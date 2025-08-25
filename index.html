@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Options Allocation Calculator</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: auto; padding: 20px; }
+        input { margin: 5px; }
+        #output { margin-top: 20px; border: 1px solid #ccc; padding: 10px; }
+        canvas { max-width: 100%; }
+    </style>
+</head>
+<body>
+    <h1>Options Position Allocation Calculator (Net Zero Repair)</h1>
+    <form id="calcForm">
+        <label>Current Spot Price: <input type="number" id="spot" step="0.01" required></label><br>
+        <label>Original Cost Basis (per share, for BE calc): <input type="number" id="costBasis" step="0.01" required></label><br>
+        <label>K1 Strike (Repair Long Call): <input type="number" id="k1" step="0.01" required></label><br>
+        <label>K2 Strike (Repair Short Calls & Covered Calls): <input type="number" id="k2" step="0.01" required></label><br>
+        <label>Days to Expiration: <input type="number" id="dte" required></label><br>
+        <h3>Scenarios (Price/Range & Percentage Prob)</h3>
+        <label>A (Extreme Down Price): <input type="number" id="priceA" step="0.01"> Prob: <input type="number" id="probA" step="0.1"></label><br>
+        <label>B (Moderate Down Price): <input type="number" id="priceB" step="0.01"> Prob: <input type="number" id="probB" step="0.1"></label><br>
+        <label>C (Target Recovery Price): <input type="number" id="priceC" step="0.01"> Prob: <input type="number" id="probC" step="0.1"></label><br>
+        <label>D (Income Zone Price): <input type="number" id="priceD" step="0.01"> Prob: <input type="number" id="probD" step="0.1"></label><br>
+        <label>E (Extreme Up Range, e.g., avg): <input type="number" id="priceE" step="0.01"> Prob: <input type="number" id="probE" step="0.1"></label><br>
+        <label>Sideways Range (avg price): <input type="number" id="priceSide" step="0.01"> Prob: <input type="number" id="probSide" step="0.1"></label><br>
+        <label>Include Naked Calls? (Risky! Alloc %): <input type="number" id="nakedAlloc" step="0.1" min="0" max="10" value="0"></label> (Warning: Unlimited upside risk if stock rallies)<br>
+        <button type="button" onclick="calculate()">Calculate</button>
+    </form>
+    <div id="output"></div>
+    <canvas id="payoffChart" width="400" height="200"></canvas>
+
+    <script>
+        function calculate() {
+            // Get inputs
+            const spot = parseFloat(document.getElementById('spot').value);
+            const costBasis = parseFloat(document.getElementById('costBasis').value);
+            const k1 = parseFloat(document.getElementById('k1').value);
+            const k2 = parseFloat(document.getElementById('k2').value);
+            const dte = parseInt(document.getElementById('dte').value);
+            const prices = {
+                A: parseFloat(document.getElementById('priceA').value) || 0,
+                B: parseFloat(document.getElementById('priceB').value) || spot * 0.9,
+                C: parseFloat(document.getElementById('priceC').value) || spot * 1.1,
+                D: parseFloat(document.getElementById('priceD').value) || spot * 1.2,
+                E: parseFloat(document.getElementById('priceE').value) || spot * 3,
+                side: parseFloat(document.getElementById('priceSide').value) || spot
+            };
+            let probs = {
+                A: parseFloat(document.getElementById('probA').value) || 0,
+                B: parseFloat(document.getElementById('probB').value) || 0,
+                C: parseFloat(document.getElementById('probC').value) || 0,
+                D: parseFloat(document.getElementById('probD').value) || 0,
+                E: parseFloat(document.getElementById('probE').value) || 0,
+                side: parseFloat(document.getElementById('probSide').value) || 0
+            };
+            const nakedAlloc = parseFloat(document.getElementById('nakedAlloc').value) || 0;
+
+            // Normalize probs
+            let totalProb = Object.values(probs).reduce((a, b) => a + b, 0);
+            if (totalProb === 0) return alert('Enter probabilities!');
+            for (let key in probs) probs[key] = (probs[key] / totalProb) * 100;
+
+            // Allocations (adjust for naked)
+            let repair = probs.C;
+            let covered = probs.D + probs.side;
+            let uncovered = 100 - repair - covered - nakedAlloc;
+            if (uncovered < 0) uncovered = 0; // Cap if over
+
+            // New Repair Break-Even (approx, zero-cost)
+            const repairBE = (costBasis + spot) / 2; // Simplified from research
+
+            // Payoff functions (per 100 shares, from current spot; assume zero premium)
+            function payoffUncovered(finalS) { return (finalS - spot); }
+            function payoffRepair(finalS) {
+                let opt = Math.max(finalS - k1, 0) - 2 * Math.max(finalS - k2, 0);
+                return (finalS - spot) + opt;
+            }
+            function payoffCovered(finalS) { return Math.min(finalS, k2) - spot; } // Caps at K2
+            function payoffNaked(finalS) { return -Math.max(finalS - k2, 0); } // Short call loss
+
+            // Portfolio EV
+            let ev = 0;
+            for (let key in prices) {
+                const p = prices[key];
+                const prob = probs[key] / 100;
+                const portPayoff = (repair/100 * payoffRepair(p)) + (covered/100 * payoffCovered(p)) + (uncovered/100 * payoffUncovered(p)) + (nakedAlloc/100 * payoffNaked(p));
+                ev += prob * portPayoff;
+            }
+
+            // Triggers
+            const repairTrigger = k1;
+            const incomeTriggerLow = k2 * 0.98;
+            const incomeTriggerHigh = k2 * 1.02;
+
+            // Output
+            let html = `<h3>Normalized Probabilities:</h3>`;
+            for (let key in probs) html += `${key} (${prices[key]}): ${probs[key].toFixed(1)}%<br>`;
+            html += `<h3>Suggested Allocations:</h3>Repair: ${repair.toFixed(1)}%<br>Covered Calls: ${covered.toFixed(1)}%<br>Uncovered: ${uncovered.toFixed(1)}%<br>Naked Calls: ${nakedAlloc.toFixed(1)}% (High Risk!)<br>`;
+            html += `<h3>Math Insights:</h3>Repair Break-Even: ~$${repairBE.toFixed(2)}<br>Portfolio Expected Value (per share from spot): $${ev.toFixed(2)}<br>`;
+            html += `<h3>Action Triggers:</h3>Repair: When spot ≤ $${repairTrigger.toFixed(2)}<br>Income (Covered): When spot ~$${incomeTriggerLow.toFixed(2)}–$${incomeTriggerHigh.toFixed(2)}<br>`;
+            html += `<h3>Management Guidelines:</h3>
+                - Apply repair on 40-50% shares now if near K1 (zero cost assumed).<br>
+                - Sell covered calls on 15-25% when income trigger hits.<br>
+                - If upside conviction +5-10%, reduce covered/naked.<br>
+                - Fast bounce to C price: Roll repair to $${k2.toFixed(2)}/$${(k2 + 0.5).toFixed(2)}.<br>
+                - Stalling at C–${(prices.C + 0.1).toFixed(2)}: Add more covered.<br>
+                - Stagnant months: Boost sideways prob, add covered.<br>
+                - Use 60–${dte}D calls at K2.<br>
+                - Stuck sub-${(spot - 0.1).toFixed(2)} (30D left): Roll down to $${(k1 + 0.25).toFixed(2)} or $${k1.toFixed(2)}, keep 30-40% uncovered.<br>
+                - Support fail (below K1): Let repair ride, no new covered/naked.<br>
+                - Profits: Close repair above K2 (>20D left); take covered profits at 50-70%.<br>
+                - Re-run after moves/IV shifts.<br>
+                - Plan: ~50% repair if near $${k1.toFixed(2)}, 30-40% uncovered, 15-25% covered @ $${k2.toFixed(2)} on trigger. Naked only if bearish on E.`;
+            document.getElementById('output').innerHTML = html;
+
+            // Payoff Chart
+            const ctx = document.getElementById('payoffChart').getContext('2d');
+            const finalPrices = Array.from({length: 20}, (_, i) => spot * (0.5 + i * 0.1));
+            const data = {
+                labels: finalPrices.map(p => p.toFixed(2)),
+                datasets: [{
+                    label: 'Portfolio Payoff',
+                    data: finalPrices.map(p => (repair/100 * payoffRepair(p)) + (covered/100 * payoffCovered(p)) + (uncovered/100 * payoffUncovered(p)) + (nakedAlloc/100 * payoffNaked(p))),
+                    borderColor: 'blue',
+                    fill: false
+                }]
+            };
+            new Chart(ctx, { type: 'line', data, options: { scales: { y: { title: { display: true, text: 'P/L per Share' } } } } });
+        }
+    </script>
+</body>
+</html>
